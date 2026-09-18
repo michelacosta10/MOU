@@ -10,7 +10,7 @@ from joblib import Parallel, delayed
 # DRIFT MATRIX
 ####################
 
-def generate_drift_matrix(N, c):
+def generate_drift_matrix_ginibre(N, c):
 
     while True:
 
@@ -19,6 +19,35 @@ def generate_drift_matrix(N, c):
 
         if np.min(np.real(np.linalg.eigvals(A))) > 0:
             return A
+
+def generate_drift_matrix_goe(N, c):
+
+    while True:
+
+        G = np.random.randn(N, N)
+        G = (G + G.T) / 2.0
+
+        G = G * (c / np.sqrt(N))
+
+        A = np.eye(N) + G
+
+        if np.min(np.linalg.eigvalsh(A)) > 0:
+            return A
+
+
+def generate_drift_matrix(N, c, ENSEMBLE):
+
+    if ENSEMBLE.upper() == "GINIBRE":
+
+        return generate_drift_matrix_ginibre(N, c)
+
+    elif ENSEMBLE.upper() == "GOE":
+
+        return generate_drift_matrix_goe(N, c)
+
+    else:
+
+        raise ValueError("ENSEMBLE must be either 'GINIBRE' or 'GOE'")
 
 
 ####################
@@ -88,12 +117,13 @@ def run_one_A_realization(
     dt_internal,
     n_sim,
     seed_A,
-    seeds_X
+    seeds_X,
+    ENSEMBLE
 ):
 
     np.random.seed(seed_A)
 
-    A_true = generate_drift_matrix(N, c)
+    A_true = generate_drift_matrix(N, c, ENSEMBLE)
 
     X_block = np.zeros((n_sim, N, M_steps), dtype=np.float32)
 
@@ -112,32 +142,52 @@ def run_one_A_realization(
 
 
 #############################
+# ARGUMENTS
+#############################
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--data-dir", type=str, default="./data")
+parser.add_argument("--N", type=int, default=100, help="matrix size")
+parser.add_argument("--q", type=int, default=10, help="q = M/N")
+parser.add_argument("--n-A", type=int, default=30, dest="n_A", help="number of A samples")
+parser.add_argument("--n-sim", type=int, default=30, dest="n_sim")
+parser.add_argument("--delta-t", type=float, default=1.0, dest="Delta_t")
+parser.add_argument("--dt-internal", type=float, default=0.1)
+parser.add_argument("--ensemble", type=str, default="GOE", choices=["GINIBRE", "GOE"])
+parser.add_argument(
+    "--c-values", type=float, nargs="+", dest="c_values",
+    default=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+    help="e.g. --c-values 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 0.99 for Ginibre"
+)
+parser.add_argument("--tag", type=str, default="6JUN", help="run tag appended to output filenames")
+args = parser.parse_args()
+
+
+#############################
 # PARAMETERS
 #############################
 
-N = 100
-q = 80
+N = args.N
+q = args.q
 
-c_values = np.array([ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99])
+c_values = np.array(args.c_values)
 
-Delta_t = 1.0
-dt_internal = 0.1
+Delta_t = args.Delta_t
+dt_internal = args.dt_internal
 
-n_A = 25
-n_sim = 25
+n_A = args.n_A
+n_sim = args.n_sim
+
+ENSEMBLE = args.ensemble
+
+RUN_TAG = args.tag
 
 
 #############################
 # CONFIG
 #############################
 
-parser = argparse.ArgumentParser(description="Generate MOU simulated trajectories.")
-parser.add_argument(
-    "--data-dir",
-    default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
-    help="Base directory where simulation output is saved (default: ./data next to this script).",
-)
-args = parser.parse_args()
+ensemble_tag = ENSEMBLE.upper()
 
 mode_tag = "sim_trajectories"
 
@@ -145,6 +195,7 @@ save_dir = os.path.join(args.data_dir, mode_tag)
 
 print("\n############################################################")
 print(f"SIMULATION ONLY — mode: {mode_tag}")
+print(f"ENSEMBLE: {ensemble_tag}")
 print("DOUBLE MONTE CARLO")
 print("ONE FILE PER c")
 print("PARALLEL OVER A REALIZATIONS")
@@ -179,23 +230,11 @@ for i_c, c in enumerate(c_values):
     print(f"Running c = {c:.4f} ({i_c + 1}/{n_c})")
     print("=" * 60)
 
-    # --------------------------------------------------
-    # Allocate only current c
-    # --------------------------------------------------
-
     A_true_c = np.zeros((n_A, N, N), dtype=np.float32)
     X_c = np.zeros((n_A, n_sim, N, M_steps), dtype=np.float32)
 
-    # --------------------------------------------------
-    # Seeds
-    # --------------------------------------------------
-
     seeds_A = np.random.randint(0, 2**32 - 1, size=n_A)
     seeds_X = np.random.randint(0, 2**32 - 1, size=(n_A, n_sim))
-
-    # --------------------------------------------------
-    # Parallel over A realizations
-    # --------------------------------------------------
 
     results = Parallel(n_jobs=-1)(
         delayed(run_one_A_realization)(
@@ -206,7 +245,8 @@ for i_c, c in enumerate(c_values):
             dt_internal,
             n_sim,
             seeds_A[i_A],
-            seeds_X[i_A]
+            seeds_X[i_A],
+            ENSEMBLE
         )
         for i_A in range(n_A)
     )
@@ -215,10 +255,6 @@ for i_c, c in enumerate(c_values):
 
         A_true_c[i_A] = A_true
         X_c[i_A] = X_block
-
-    # --------------------------------------------------
-    # Save current c
-    # --------------------------------------------------
 
     c_tag = f"{c:g}"
 
@@ -230,10 +266,15 @@ for i_c, c in enumerate(c_values):
         f"_nA{n_A}"
         f"_nsim{n_sim}"
         f"_c{c_tag}"
-        f"_GINIBRE_6JUN.npz"
+        f"_{ensemble_tag}_{RUN_TAG}.npz"
     )
 
     filepath = os.path.join(save_dir, filename)
+
+    print("Saving to:", filepath)
+    print("Directory exists:", os.path.isdir(save_dir))
+
+    os.makedirs(save_dir, exist_ok=True)
 
     np.savez_compressed(
         filepath,
@@ -255,6 +296,8 @@ for i_c, c in enumerate(c_values):
         n_A=n_A,
         n_sim=n_sim,
 
+        ENSEMBLE=ensemble_tag,
+
         seeds_A=seeds_A,
         seeds_X=seeds_X
     )
@@ -263,10 +306,6 @@ for i_c, c in enumerate(c_values):
     print(filepath)
 
     print(f"Finished c = {c:.4f} in {time.time() - c_start_time:.2f} sec")
-
-    # --------------------------------------------------
-    # Free RAM
-    # --------------------------------------------------
 
     del A_true_c, X_c, results
     gc.collect()

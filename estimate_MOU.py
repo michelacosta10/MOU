@@ -1,9 +1,10 @@
 import argparse
+import glob
 import numpy as np
 import os
 import time
 import gc
-from scipy.linalg import logm, solve_discrete_lyapunov
+from scipy.linalg import logm, solve_discrete_lyapunov, expm
 from joblib import Parallel, delayed
 
 import warnings
@@ -32,13 +33,45 @@ def estimate_bayes_I(X, dt, lag=1):
     Q = T2 @ T3_inv
 
     Sigma_dt = T1 - T2 @ T3_inv @ T2.T
-    Sigma_dt = (Sigma_dt + Sigma_dt.T) / 2.0
+    Sigma_dt = 0.5 * (Sigma_dt + Sigma_dt.T)
 
     A_comp = -logm(Q) / (dt * lag)
     A = np.real(A_comp)
 
     Sigma_inf = solve_discrete_lyapunov(Q, Sigma_dt)
-    Sigma_inf = (Sigma_inf + Sigma_inf.T) / 2.0
+    Sigma_inf = 0.5 * (Sigma_inf + Sigma_inf.T)
+
+    B = 0.5 * (A @ Sigma_inf + Sigma_inf @ A.T)
+
+    return A, Q, Sigma_dt, Sigma_inf, B
+
+
+####################
+# ESTIMATOR: BAYES I symm
+####################
+
+def estimate_bayes_I_sym(X, dt, lag=1):
+
+    X = X.astype(np.float64)
+    N, T = X.shape
+
+    T1 = X[:, lag:]  @ X[:, lag:].T  / (T - lag)
+    T2 = X[:, lag:]  @ X[:, :-lag].T / (T - lag)
+    T3 = X[:, :-lag] @ X[:, :-lag].T / (T - lag)
+
+    T3_inv = np.linalg.inv(T3)
+
+    Q = T2 @ T3_inv
+    Q = 0.5 * (Q + Q.T)
+
+    Sigma_dt = T1 - T2 @ T3_inv @ T2.T
+    Sigma_dt = 0.5 * (Sigma_dt + Sigma_dt.T)
+
+    A_comp = -logm(Q) / (dt * lag)
+    A = np.real(A_comp)
+
+    Sigma_inf = solve_discrete_lyapunov(Q, Sigma_dt)
+    Sigma_inf = 0.5 * (Sigma_inf + Sigma_inf.T)
 
     B = 0.5 * (A @ Sigma_inf + Sigma_inf @ A.T)
 
@@ -49,7 +82,7 @@ def estimate_bayes_I(X, dt, lag=1):
 # ESTIMATE ONE A BLOCK
 ####################
 
-def estimate_one_A_block(X_block, Delta_t, lag):
+def estimate_one_A_block(X_block, Delta_t, lag, ENSEMBLE):
 
     n_sim, N, M_steps = X_block.shape
 
@@ -65,11 +98,26 @@ def estimate_one_A_block(X_block, Delta_t, lag):
 
         try:
 
-            A, Q, Sigma_dt, Sigma_inf, B = estimate_bayes_I(
-                X_block[sim],
-                Delta_t,
-                lag
-            )
+            if ENSEMBLE.upper() == "GINIBRE":
+
+                A, Q, Sigma_dt, Sigma_inf, B = estimate_bayes_I(
+                    X_block[sim],
+                    Delta_t,
+                    lag
+                )
+
+            elif ENSEMBLE.upper() == "GOE":
+
+                A, Q, Sigma_dt, Sigma_inf, B = estimate_bayes_I_sym(
+                    X_block[sim],
+                    Delta_t,
+                    lag
+                )
+
+
+            else:
+
+                raise ValueError("ENSEMBLE must be either 'GINIBRE' or 'GOE'")
 
             A_block[sim]         = np.real(A).astype(np.float32)
             Q_block[sim]         = np.real(Q).astype(np.float32)
@@ -92,18 +140,33 @@ def estimate_one_A_block(X_block, Delta_t, lag):
 
 
 ######################################################################################################################
+# ARGUMENTS
+######################################################################################################################
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--data-dir", type=str, default="./data")
+parser.add_argument("--ensemble", type=str, default="GOE", choices=["GINIBRE", "GOE"])
+parser.add_argument(
+    "--c-values", type=float, nargs="+", dest="c_values",
+    default=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+    help="c values to estimate; must match files produced by generate_data_MOU.py"
+)
+parser.add_argument("--tag", type=str, default="6JUN", help="run tag used in the simulation filenames")
+parser.add_argument("--lag", type=int, default=1)
+args = parser.parse_args()
+
+
+######################################################################################################################
 # CONFIG
 ######################################################################################################################
 
-parser = argparse.ArgumentParser(description="Estimate MOU drift matrices from simulated trajectories.")
-parser.add_argument(
-    "--data-dir",
-    default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
-    help="Base directory containing 'sim_trajectories' and where 'estimates' is written (default: ./data next to this script).",
-)
-args = parser.parse_args()
+lag = args.lag
 
-lag = 1
+ENSEMBLE = args.ensemble
+
+RUN_TAG = args.tag
+
+ensemble_tag = ENSEMBLE.upper()
 
 sim_dir = os.path.join(args.data_dir, "sim_trajectories")
 est_dir = os.path.join(args.data_dir, "estimates")
@@ -111,7 +174,10 @@ est_dir = os.path.join(args.data_dir, "estimates")
 os.makedirs(est_dir, exist_ok=True)
 
 print("\n############################################################")
-print("ESTIMATION ONLY — BAYES I")
+print("ESTIMATION ONLY")
+print(f"ENSEMBLE: {ensemble_tag}")
+print("GINIBRE -> Bayes I")
+print("GOE     -> C^{-1}")
 print("ONE ESTIMATION FILE PER c")
 print("ONLY lag = 1")
 print("PARALLEL OVER A REALIZATIONS")
@@ -125,7 +191,7 @@ total_start = time.time()
 # SELECT c VALUES TO ESTIMATE
 #############################
 
-c_values_to_estimate = np.array([ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99 ])
+c_values_to_estimate = np.array(args.c_values)
 
 sim_files = []
 
@@ -133,23 +199,23 @@ for c in c_values_to_estimate:
 
     c_tag = f"{c:g}"
 
-    sim_file = (
-        f"DATASIM"
-        f"_N100"
-        f"_q80"
-        f"_Dt1.0"
-        f"_nA25"
-        f"_nsim25"
-        f"_c{c_tag}"
-        f"_GINIBRE_6JUN.npz"
+    pattern = os.path.join(
+        sim_dir,
+        f"DATASIM_*_c{c_tag}_{ensemble_tag}_{RUN_TAG}.npz"
     )
 
-    sim_path = os.path.join(sim_dir, sim_file)
+    matches = sorted(glob.glob(pattern))
 
-    if not os.path.exists(sim_path):
-        raise FileNotFoundError(f"Missing simulation file:\n{sim_path}")
+    if len(matches) == 0:
+        raise FileNotFoundError(f"No simulation file found matching:\n{pattern}")
 
-    sim_files.append(sim_file)
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"Multiple simulation files match c={c_tag}, expected exactly one:\n"
+            + "\n".join(matches)
+        )
+
+    sim_files.append(os.path.basename(matches[0]))
 
 print(f"Selected {len(sim_files)} simulation files:")
 for f in sim_files:
@@ -206,7 +272,8 @@ for file_idx, sim_file in enumerate(sim_files):
         delayed(estimate_one_A_block)(
             X_c[i_A],
             Delta_t,
-            lag
+            lag,
+            ENSEMBLE
         )
         for i_A in range(n_A)
     )
@@ -226,7 +293,7 @@ for file_idx, sim_file in enumerate(sim_files):
     c_tag = f"{c_value:g}"
 
     est_filename = (
-        f"EST_BAYES_I"
+        f"EST"
         f"_N{N}"
         f"_q{q}"
         f"_Dt{Delta_t}"
@@ -234,7 +301,7 @@ for file_idx, sim_file in enumerate(sim_files):
         f"_nsim{n_sim}"
         f"_lag{lag}"
         f"_c{c_tag}"
-        f"_GINIBRE_6JUN.npz"
+        f"_{ensemble_tag}_{RUN_TAG}.npz"
     )
 
     est_path = os.path.join(est_dir, est_filename)
@@ -251,7 +318,6 @@ for file_idx, sim_file in enumerate(sim_files):
         A_true=A_true_c,
 
         c_value=c_value,
-
         lag=lag,
 
         fail_total=fail_total,
@@ -265,6 +331,8 @@ for file_idx, sim_file in enumerate(sim_files):
 
         n_A=n_A,
         n_sim=n_sim,
+
+        ENSEMBLE=ensemble_tag,
 
         source_sim_file=sim_file
     )

@@ -1,4 +1,7 @@
 data/
+figures/
+logs/*.out
+logs/*.err
 __pycache__/
 *.pyc
 .ipynb_checkpoints/

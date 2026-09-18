@@ -1,6 +1,6 @@
 # MOU
 
-Simulation and estimation of multivariate Ornstein-Uhlenbeck (MOU) processes with random Ginibre drift matrices.
+Simulation and estimation of multivariate Ornstein-Uhlenbeck (MOU) processes with random Ginibre/GOE drift matrices.
 
 ## Scripts
 
@@ -16,7 +16,7 @@ python generate_data_MOU.py --data-dir ./data
 python estimate_MOU.py --data-dir ./data
 ```
 
-By default, `--data-dir` points to a `data/` folder next to the scripts (not tracked by git). Output is organized as:
+By default, `--data-dir` points to a `data/` folder next to the scripts (not tracked by git). All simulation parameters (`--N`, `--q`, `--n-A`, `--n-sim`, `--delta-t`, `--dt-internal`, `--ensemble`, `--c-values`, `--tag`) are also CLI flags — see `--help` on either script. Defaults are `N=100, q=10, n_A=30, n_sim=30`, GOE ensemble, `c` from `0.1` to `0.7`. `estimate_MOU.py` locates the matching simulation files automatically (via `--ensemble`, `--c-values`, `--tag`), so make sure these match what you passed to `generate_data_MOU.py`. Output is organized as:
 
 ```
 data/
